@@ -1,19 +1,17 @@
 services:
   - type: web
     name: jal-drishti-api
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    disk:
-      name: jal-drishti-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
       - key: JAL_DB_PATH
-        value: /data/jal_drishiti.sqlite3
+        value: ./jal_drishiti.sqlite3
       - key: JAL_UPLOADS_PATH
-        value: /data/uploads
+        value: ./uploads
       - key: JAL_JWT_SECRET
         generateValue: true
       - key: JAL_ADMIN_PASSWORD

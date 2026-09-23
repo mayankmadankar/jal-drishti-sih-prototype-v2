@@ -97,7 +97,7 @@ For internet deployment, put TLS behind a managed reverse proxy, use a managed P
 
 ## Deploy to Vercel + Render
 
-The Vite frontend is deployed to Vercel and the FastAPI backend to Render. The backend needs a persistent disk for SQLite and uploaded evidence; a Vercel-only deployment cannot provide that storage.
+The Vite frontend is deployed to Vercel and the FastAPI backend to Render. The free Render service is suitable for a prototype; its filesystem is ephemeral, so SQLite records and uploaded evidence may be lost on restart or idle spin-down. Durable local storage requires a paid Render service and disk.
 
 1. Push this repository to GitHub and import it in Vercel. Set the Vercel **Root Directory** to `frontend`; the checked-in `frontend/vercel.json` configures the build and SPA routes.
 2. In Vercel project settings, add `VITE_API_URL` with the public HTTPS base URL of the Render API (no trailing slash), then redeploy. The frontend build embeds this value.
