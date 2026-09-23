@@ -1,0 +1,33 @@
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      JAL_JWT_SECRET: ${JAL_JWT_SECRET:?Set JAL_JWT_SECRET in .env}
+      JAL_ADMIN_PASSWORD: ${JAL_ADMIN_PASSWORD:?Set JAL_ADMIN_PASSWORD in .env}
+      JAL_OFFICE_PASSWORD: ${JAL_OFFICE_PASSWORD:?Set JAL_OFFICE_PASSWORD in .env}
+      JAL_FIELD_PASSWORD: ${JAL_FIELD_PASSWORD:?Set JAL_FIELD_PASSWORD in .env}
+      JAL_DB_PATH: /data/jal_drishiti.sqlite3
+      JAL_PUBLIC_BASE_URL: ${JAL_PUBLIC_BASE_URL:-http://localhost:8080}
+      JAL_CORS_ORIGINS: ${JAL_PUBLIC_BASE_URL:-http://localhost:8080}
+    volumes:
+      - app_data:/data
+      - uploaded_images:/app/uploads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8080}:80"
+
+volumes:
+  app_data:
+  uploaded_images:

@@ -1,0 +1,29 @@
+[
+  {
+    "id": "WS-001",
+    "name": "Sehore Demonstration Watershed",
+    "district": "Sehore",
+    "state": "Madhya Pradesh",
+    "area_ha": 1840,
+    "latitude": 23.2037,
+    "longitude": 77.0844
+  },
+  {
+    "id": "WS-002",
+    "name": "Raisen Demonstration Watershed",
+    "district": "Raisen",
+    "state": "Madhya Pradesh",
+    "area_ha": 2210,
+    "latitude": 23.3167,
+    "longitude": 77.7833
+  },
+  {
+    "id": "WS-003",
+    "name": "Vidisha Demonstration Watershed",
+    "district": "Vidisha",
+    "state": "Madhya Pradesh",
+    "area_ha": 1950,
+    "latitude": 23.5251,
+    "longitude": 77.8081
+  }
+]

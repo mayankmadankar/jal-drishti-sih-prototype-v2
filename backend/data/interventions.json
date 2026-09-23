@@ -1,0 +1,67 @@
+[
+  {
+    "id": "INT-001",
+    "name": "Check Dam A",
+    "type": "Check Dam",
+    "watershed_id": "WS-001",
+    "latitude": 23.215,
+    "longitude": 77.105,
+    "before_ndvi": 0.31,
+    "after_ndvi": 0.46,
+    "before_water_ha": 5.2,
+    "after_water_ha": 8.4,
+    "photo_verified": true
+  },
+  {
+    "id": "INT-002",
+    "name": "Farm Pond B",
+    "type": "Farm Pond",
+    "watershed_id": "WS-001",
+    "latitude": 23.188,
+    "longitude": 77.061,
+    "before_ndvi": 0.28,
+    "after_ndvi": 0.35,
+    "before_water_ha": 2.1,
+    "after_water_ha": 3.2,
+    "photo_verified": true
+  },
+  {
+    "id": "INT-003",
+    "name": "Contour Trench C",
+    "type": "Contour Trench",
+    "watershed_id": "WS-002",
+    "latitude": 23.331,
+    "longitude": 77.751,
+    "before_ndvi": 0.4,
+    "after_ndvi": 0.43,
+    "before_water_ha": 6.8,
+    "after_water_ha": 7.0,
+    "photo_verified": false
+  },
+  {
+    "id": "INT-004",
+    "name": "Percolation Tank D",
+    "type": "Percolation Tank",
+    "watershed_id": "WS-002",
+    "latitude": 23.295,
+    "longitude": 77.806,
+    "before_ndvi": 0.22,
+    "after_ndvi": 0.25,
+    "before_water_ha": 3.0,
+    "after_water_ha": 3.1,
+    "photo_verified": false
+  },
+  {
+    "id": "INT-005",
+    "name": "Recharge Structure E",
+    "type": "Recharge Structure",
+    "watershed_id": "WS-003",
+    "latitude": 23.511,
+    "longitude": 77.791,
+    "before_ndvi": 0.33,
+    "after_ndvi": 0.52,
+    "before_water_ha": 4.4,
+    "after_water_ha": 7.6,
+    "photo_verified": true
+  }
+]

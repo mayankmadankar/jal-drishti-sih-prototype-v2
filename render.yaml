@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: jal-drishti-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    disk:
+      name: jal-drishti-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: JAL_DB_PATH
+        value: /data/jal_drishiti.sqlite3
+      - key: JAL_UPLOADS_PATH
+        value: /data/uploads
+      - key: JAL_JWT_SECRET
+        generateValue: true
+      - key: JAL_ADMIN_PASSWORD
+        sync: false
+      - key: JAL_OFFICE_PASSWORD
+        sync: false
+      - key: JAL_FIELD_PASSWORD
+        sync: false
+      - key: JAL_CORS_ORIGINS
+        sync: false
