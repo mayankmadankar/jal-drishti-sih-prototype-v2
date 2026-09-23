@@ -13,7 +13,7 @@ services:
       - key: JAL_UPLOADS_PATH
         value: ./uploads
       - key: JAL_PUBLIC_BASE_URL
-        value: https://jal-drishiti-api-jkhn.onrender.com
+        value: https://jal-drishti-api-jkhn.onrender.com
       - key: JAL_JWT_SECRET
         generateValue: true
       - key: JAL_ADMIN_PASSWORD
@@ -23,6 +23,6 @@ services:
       - key: JAL_FIELD_PASSWORD
         sync: false
       - key: JAL_CORS_ORIGINS
-        value: https://jal-drishiti-sih-prototype-v2-h9i7wv9t-mayankmandankar.vercel.app
+        value: https://jal-drishti-sih-prototype-v2.vercel.app
       - key: JAL_CORS_ORIGIN_REGEX
         value: 'https://[a-zA-Z0-9-]+\.vercel\.app'
