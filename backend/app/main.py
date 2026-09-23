@@ -6,7 +6,7 @@ from typing import Annotated
 
 import jwt
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, UploadFile, File, HTTPException, Request, status
+from fastapi import Depends, FastAPI, UploadFile, File, Form, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import shutil, uuid, json
@@ -60,6 +60,16 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+class LocationLockRequest(BaseModel):
+    latitude: float
+    longitude: float
+    accuracy: float | None = None
+    source: str
+
+class EvidenceSubmitRequest(BaseModel):
+    intervention_id: str | None = None
+    watershed_id: str | None = None
+
 def db():
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
@@ -73,6 +83,22 @@ def init_db():
             quality TEXT NOT NULL, computer_vision TEXT NOT NULL,
             status TEXT NOT NULL, created_at TEXT NOT NULL, uploaded_by TEXT NOT NULL
         )""")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(evidence)").fetchall()}
+        additions = {
+            "watershed_id": "TEXT",
+            "intervention_id": "TEXT",
+            "gps_latitude": "REAL",
+            "gps_longitude": "REAL",
+            "gps_accuracy": "REAL",
+            "gps_source": "TEXT",
+            "location_locked": "INTEGER NOT NULL DEFAULT 0",
+            "location_locked_at": "TEXT",
+            "photo_timestamp": "TEXT",
+            "submitted_at": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE evidence ADD COLUMN {name} {definition}")
 
 init_db()
 
@@ -97,6 +123,13 @@ def require_office(user=Depends(current_user)):
 def load_json(name):
     with open(DATA / name, encoding="utf-8") as f:
         return json.load(f)
+
+def serialize_evidence(row):
+    data = dict(row)
+    for key in ("exif", "quality", "computer_vision"):
+        data[key] = json.loads(data[key])
+    data["location_locked"] = bool(data.get("location_locked"))
+    return data
 
 @app.get("/")
 def root():
@@ -126,17 +159,24 @@ def me(user=Depends(current_user)):
     return {"username": user["sub"], "role": user["role"]}
 
 @app.get("/api/watersheds")
-def watersheds(user=Depends(require_office)):
+def watersheds(user=Depends(current_user)):
     return load_json("watersheds.json")
 
 @app.get("/api/interventions")
-def interventions(user=Depends(require_office)):
-    return load_json("interventions.json")
+def interventions(user=Depends(current_user)):
+    items = load_json("interventions.json")
+    for item in items:
+        rainfall = rainfall_context_for(item)
+        impact = calculate_impact_score(item, rainfall)
+        item["impact_score"] = impact["score"]
+        item["outcome_score"] = outcome_score(item)
+        item["status"] = "GOOD" if impact["score"] >= 75 else "ATTENTION" if impact["score"] >= 50 else "CRITICAL"
+    return items
 
 @app.get("/api/summary")
 def summary(user=Depends(require_office)):
     items = load_json("interventions.json")
-    scores = [outcome_score(x) for x in items]
+    scores = [calculate_impact_score(x, rainfall_context_for(x))["score"] for x in items]
     return {
         "watersheds": len(load_json("watersheds.json")),
         "interventions": len(items),
@@ -150,7 +190,7 @@ def summary(user=Depends(require_office)):
 def alerts(user=Depends(require_office)):
     result = []
     for x in load_json("interventions.json"):
-        s = outcome_score(x)
+        s = calculate_impact_score(x, rainfall_context_for(x))["score"]
         if s < 75:
             result.append({
                 "id": x["id"],
@@ -166,10 +206,10 @@ def alerts(user=Depends(require_office)):
 def evidence(user=Depends(require_office)):
     with db() as connection:
         rows = connection.execute("SELECT * FROM evidence ORDER BY created_at DESC").fetchall()
-    return [{**dict(row), "exif": json.loads(row["exif"]), "quality": json.loads(row["quality"]), "computer_vision": json.loads(row["computer_vision"])} for row in rows]
+    return [serialize_evidence(row) for row in rows]
 
 @app.get("/api/analysis/{item_id}")
-def analysis(item_id: str, user=Depends(require_office)):
+def analysis(item_id: str, user=Depends(current_user)):
     item = next(
         (i for i in load_json("interventions.json") if i["id"] == item_id),
         None,
@@ -181,6 +221,9 @@ def analysis(item_id: str, user=Depends(require_office)):
     impact = calculate_impact_score(item, rainfall)
     anomaly = detect_anomaly(item, rainfall)
     intervention = intervention_specific_analysis(item)
+    with db() as connection:
+        rows = connection.execute("SELECT * FROM evidence ORDER BY created_at DESC").fetchall()
+    evidence = [serialize_evidence(row) for row in rows if not row["intervention_id"] or row["intervention_id"] == item_id]
 
     return {
         "intervention": item,
@@ -192,6 +235,7 @@ def analysis(item_id: str, user=Depends(require_office)):
         "impact": impact,
         "anomaly": anomaly,
         "intervention_analysis": intervention,
+        "evidence": evidence,
         "method_label": "Prototype analysis using deterministic demo watershed indicators",
     }
 
@@ -250,7 +294,7 @@ def inspections(user=Depends(require_office)):
     return rows
 
 @app.get("/api/report/{item_id}")
-def report_detail(item_id: str, user=Depends(require_office)):
+def report_detail(item_id: str, user=Depends(current_user)):
     item = next((i for i in load_json("interventions.json") if i["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Intervention not found")
@@ -261,7 +305,17 @@ def report_detail(item_id: str, user=Depends(require_office)):
     return generate_report(item, watershed or {}, impact, rainfall, anomaly, evidence_count=1)
 
 @app.post("/api/upload-image")
-async def upload_image(request: Request, file: UploadFile = File(...), user=Depends(current_user)):
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    watershed_id: str | None = Form(None),
+    intervention_id: str | None = Form(None),
+    gps_latitude: float | None = Form(None),
+    gps_longitude: float | None = Form(None),
+    gps_accuracy: float | None = Form(None),
+    gps_source: str | None = Form(None),
+    user=Depends(current_user),
+):
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "Please upload an image file")
     if file.size and file.size > 10 * 1024 * 1024:
@@ -285,7 +339,10 @@ async def upload_image(request: Request, file: UploadFile = File(...), user=Depe
         path.unlink(missing_ok=True)
         raise HTTPException(400, f"Invalid image: {e}")
 
+    evidence_id = uuid.uuid4().hex
+    submitted_at = None if intervention_id else datetime.now(timezone.utc).isoformat()
     result = {
+        "id": evidence_id,
         "filename": name,
         "url": (PUBLIC_BASE_URL or str(request.base_url).rstrip("/") ) + f"/uploads/{name}",
         "width": width,
@@ -293,12 +350,70 @@ async def upload_image(request: Request, file: UploadFile = File(...), user=Depe
         "exif": exif,
         "quality": quality,
         "computer_vision": cv,
+        "watershed_id": watershed_id,
+        "intervention_id": intervention_id,
+        "gps_latitude": gps_latitude,
+        "gps_longitude": gps_longitude,
+        "gps_accuracy": gps_accuracy,
+        "gps_source": gps_source,
+        "location_locked": False,
+        "location_locked_at": None,
+        "photo_timestamp": exif.get("timestamp"),
+        "submitted_at": submitted_at,
         "message": "Image uploaded and checked successfully.",
     }
     with db() as connection:
-        connection.execute("INSERT INTO evidence VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-            uuid.uuid4().hex, name, result["url"], width, height, json.dumps(exif),
-            json.dumps(quality), json.dumps(cv), "READY FOR OFFICE REVIEW",
-            datetime.now(timezone.utc).isoformat(), user["sub"],
+        connection.execute("""INSERT INTO evidence
+            (id, filename, url, width, height, exif, quality, computer_vision, status, created_at, uploaded_by,
+             watershed_id, intervention_id, gps_latitude, gps_longitude, gps_accuracy, gps_source,
+             location_locked, location_locked_at, photo_timestamp, submitted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+            evidence_id, name, result["url"], width, height, json.dumps(exif), json.dumps(quality), json.dumps(cv),
+            "DRAFT - LOCATION REVIEW" if intervention_id else "READY FOR OFFICE REVIEW",
+            datetime.now(timezone.utc).isoformat(), user["sub"], watershed_id, intervention_id,
+            gps_latitude, gps_longitude, gps_accuracy, gps_source, 0, None, exif.get("timestamp"), submitted_at,
         ))
     return result
+
+@app.post("/api/evidence/{evidence_id}/lock-location")
+def lock_location(evidence_id: str, payload: LocationLockRequest, user=Depends(current_user)):
+    if payload.source not in {"Photo EXIF", "Current Device GPS"}:
+        raise HTTPException(400, "Location source must be Photo EXIF or Current Device GPS")
+    with db() as connection:
+        row = connection.execute("SELECT * FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        if row["uploaded_by"] != user["sub"] and user.get("role") not in {"office", "admin"}:
+            raise HTTPException(403, "Evidence belongs to another field officer")
+        if row["location_locked"]:
+            raise HTTPException(409, "Location is already locked. Unlock and re-verify explicitly before changing it.")
+        locked_at = datetime.now(timezone.utc).isoformat()
+        connection.execute("""UPDATE evidence SET gps_latitude = ?, gps_longitude = ?, gps_accuracy = ?,
+            gps_source = ?, location_locked = 1, location_locked_at = ? WHERE id = ?""",
+            (payload.latitude, payload.longitude, payload.accuracy, payload.source, locked_at, evidence_id))
+    return {"id": evidence_id, "latitude": payload.latitude, "longitude": payload.longitude, "accuracy": payload.accuracy, "source": payload.source, "locked": True, "lockedAt": locked_at}
+
+@app.post("/api/evidence/{evidence_id}/unlock-location")
+def unlock_location(evidence_id: str, user=Depends(current_user)):
+    with db() as connection:
+        row = connection.execute("SELECT * FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        if row["uploaded_by"] != user["sub"] and user.get("role") not in {"office", "admin"}:
+            raise HTTPException(403, "Evidence belongs to another field officer")
+        connection.execute("UPDATE evidence SET location_locked = 0, location_locked_at = NULL, status = ? WHERE id = ?", ("DRAFT - LOCATION REVIEW", evidence_id))
+    return {"id": evidence_id, "locked": False}
+
+@app.post("/api/evidence/{evidence_id}/submit")
+def submit_evidence(evidence_id: str, payload: EvidenceSubmitRequest, user=Depends(current_user)):
+    with db() as connection:
+        row = connection.execute("SELECT * FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        if row["uploaded_by"] != user["sub"] and user.get("role") not in {"office", "admin"}:
+            raise HTTPException(403, "Evidence belongs to another field officer")
+        if not row["location_locked"]:
+            raise HTTPException(400, "Lock a verified location before submitting evidence")
+        connection.execute("""UPDATE evidence SET watershed_id = COALESCE(?, watershed_id), intervention_id = COALESCE(?, intervention_id),
+            status = ?, submitted_at = ? WHERE id = ?""", (payload.watershed_id, payload.intervention_id, "SUBMITTED FOR OFFICE ANALYSIS", datetime.now(timezone.utc).isoformat(), evidence_id))
+    return {"id": evidence_id, "status": "SUBMITTED FOR OFFICE ANALYSIS"}

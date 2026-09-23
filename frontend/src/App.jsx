@@ -6,16 +6,6 @@ import "leaflet/dist/leaflet.css"
 
 const API = import.meta.env.VITE_API_URL || ""
 
-const score = (item) => {
-  if (!item) return 0
-  return Math.min(100, Math.round(
-    40 +
-    Math.min(Math.max((item.after_ndvi - item.before_ndvi) * 100, 0), 35) +
-    Math.min(Math.max((item.after_water_ha - item.before_water_ha) * 20, 0), 35) +
-    (item.photo_verified ? 10 : 0)
-  ))
-}
-
 const status = (s) => s >= 75 ? "GOOD" : s >= 50 ? "ATTENTION" : "CRITICAL"
 
 function FitBounds({points}) {
@@ -60,6 +50,12 @@ export default function App() {
   const [uploadError, setUploadError] = useState("")
   const [appError, setAppError] = useState("")
   const [uploading, setUploading] = useState(false)
+  const [fieldWatershed, setFieldWatershed] = useState("")
+  const [fieldIntervention, setFieldIntervention] = useState("")
+  const [deviceLocation, setDeviceLocation] = useState(null)
+  const [locationError, setLocationError] = useState("")
+  const [locationLocked, setLocationLocked] = useState(false)
+  const [fieldSubmitted, setFieldSubmitted] = useState(false)
   const [dark, setDark] = useState(false)
 
   const authHeaders = () => ({Authorization: `Bearer ${session?.token}`})
@@ -78,8 +74,15 @@ export default function App() {
 
   async function load() {
     if (!session) return
-    if (session.user.role === "user") return
     try {
+      const catalogRequests = [apiFetch("/api/watersheds"), apiFetch("/api/interventions")]
+      if (session.user.role === "user") {
+        const [watershedsRes, interventionsRes] = await Promise.all(catalogRequests)
+        if (!watershedsRes.ok || !interventionsRes.ok) throw new Error("Field catalogs could not be loaded")
+        setWatersheds(await watershedsRes.json())
+        setItems(await interventionsRes.json())
+        return
+      }
       const [summaryRes, watershedsRes, interventionsRes, alertsRes, evidenceRes, inspectionsRes] = await Promise.all([
         apiFetch("/api/summary"),
         apiFetch("/api/watersheds"),
@@ -140,7 +143,7 @@ export default function App() {
   }
 
   const filtered = useMemo(() => items.filter((item) => {
-    const itemScore = score(item)
+    const itemScore = Number(item.impact_score ?? item.outcome_score ?? 0) || 0
     const matchesQuery = item.name.toLowerCase().includes(query.toLowerCase())
     const matchesType = type === "ALL" || item.type === type
     const matchesState = state === "ALL" || status(itemScore) === state
@@ -176,11 +179,23 @@ export default function App() {
     try {
       const form = new FormData()
       form.append("file", file)
+      if (fieldWatershed) form.append("watershed_id", fieldWatershed)
+      if (fieldIntervention) form.append("intervention_id", fieldIntervention)
+      const photoGps = upload?.exif?.gps_available ? {latitude: upload.exif.latitude, longitude: upload.exif.longitude, source: "Photo EXIF"} : null
+      const location = photoGps || deviceLocation
+      if (location) {
+        form.append("gps_latitude", String(location.latitude))
+        form.append("gps_longitude", String(location.longitude))
+        if (location.accuracy != null) form.append("gps_accuracy", String(location.accuracy))
+        form.append("gps_source", location.source)
+      }
       const response = await apiFetch("/api/upload-image", {method: "POST", body: form})
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || "The image upload failed.")
       setUpload(data)
-      setEvidence((current) => [{...data, id: data.filename, status: "READY FOR OFFICE REVIEW"}, ...current])
+      setLocationLocked(false)
+      setFieldSubmitted(false)
+      setEvidence((current) => [{...data, status: data.intervention_id ? "DRAFT - LOCATION REVIEW" : "READY FOR OFFICE REVIEW"}, ...current])
       setTab("field")
     } catch (error) {
       setUpload(null)
@@ -190,12 +205,60 @@ export default function App() {
     }
   }
 
+  function useCurrentDeviceLocation() {
+    setLocationError("")
+    if (!navigator.geolocation) {
+      setLocationError("Current device location could not be obtained.")
+      return
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => setDeviceLocation({latitude: position.coords.latitude, longitude: position.coords.longitude, accuracy: position.coords.accuracy, source: "Current Device GPS"}),
+      () => setLocationError("Location permission denied or GPS unavailable. No coordinates were added."),
+      {enableHighAccuracy: true, timeout: 10000, maximumAge: 0},
+    )
+  }
+
+  async function lockFieldLocation() {
+    if (!upload?.id) return
+    const location = upload.exif?.gps_available
+      ? {latitude: upload.exif.latitude, longitude: upload.exif.longitude, source: "Photo EXIF"}
+      : deviceLocation
+    if (!location) {
+      setLocationError("GPS metadata unavailable. Use current device location before locking.")
+      return
+    }
+    try {
+      const response = await apiFetch(`/api/evidence/${upload.id}/lock-location`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(location)})
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || "Location could not be locked")
+      setUpload((current) => ({...current, gps_latitude: data.latitude, gps_longitude: data.longitude, gps_accuracy: data.accuracy, gps_source: data.source, location_locked: true, location_locked_at: data.lockedAt}))
+      setLocationLocked(true)
+      setLocationError("")
+    } catch (error) {
+      setLocationError(error.message)
+    }
+  }
+
+  async function submitFieldEvidence() {
+    if (!upload?.id || !locationLocked) return
+    try {
+      const response = await apiFetch(`/api/evidence/${upload.id}/submit`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({watershed_id: fieldWatershed, intervention_id: fieldIntervention})})
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || "Evidence submission failed")
+      setFieldSubmitted(true)
+      setUpload((current) => ({...current, status: data.status, submitted_at: new Date().toISOString()}))
+      await load()
+    } catch (error) {
+      setUploadError(error.message || "Network unavailable. Evidence has not been submitted.")
+    }
+  }
+
   function exportReport() {
     const report = items.map((item) => ({
       name: item.name,
       type: item.type,
-      outcome_score: score(item),
-      status: status(score(item)),
+      outcome_score: Number(item.impact_score ?? item.outcome_score ?? 0),
+      status: status(Number(item.impact_score ?? item.outcome_score ?? 0)),
     }))
     const blob = new Blob([JSON.stringify(report, null, 2)], {type: "application/json"})
     const a = document.createElement("a")
@@ -208,6 +271,8 @@ export default function App() {
     {name: "Before", NDVI: selected.intervention.before_ndvi, Water: selected.intervention.before_water_ha},
     {name: "After", NDVI: selected.intervention.after_ndvi, Water: selected.intervention.after_water_ha},
   ] : []
+  const analysisScore = selected ? Number(selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? 0) : 0
+  const evidenceItem = selected && Array.isArray(selected.evidence) && selected.evidence.length ? selected.evidence[0] : null
 
   const pieData = summary ? [
     {name: "Good", value: summary.green},
@@ -259,10 +324,10 @@ export default function App() {
         </div>
       </header>
 
-      <nav>
+      <nav className="main-nav">
         {isOffice && <button className={tab === "dashboard" ? "active" : ""} onClick={() => setTab("dashboard")}>🗺️ Office Map</button>}
         {isOffice && <button className={tab === "analysis" ? "active" : ""} onClick={() => setTab("analysis")}>📊 Analyze</button>}
-        <button className={tab === "field" ? "active" : ""} onClick={() => setTab("field")}>📷 Upload Evidence</button>
+        <button className={tab === "field" ? "active" : ""} onClick={() => setTab("field")}>📷 Field Evidence</button>
         {isOffice && <button className={tab === "alerts" ? "active" : ""} onClick={() => setTab("alerts")}>🚨 Review Queue <b>{alerts.length + evidence.length}</b></button>}
       </nav>
 
@@ -323,7 +388,7 @@ export default function App() {
                 <Marker key={item.id} position={[item.latitude, item.longitude]}>
                   <Popup>
                     <b>{item.name}</b><br />{item.type}<br />
-                    Impact: <b>{score(item)}/100</b><br />
+                    Impact: <b>{Number(item.impact_score ?? item.outcome_score ?? 0)}/100</b><br />
                     <button onClick={() => selectAnalysis(item)}>View Analysis</button>
                   </Popup>
                 </Marker>
@@ -350,7 +415,7 @@ export default function App() {
               {filtered.map((item) => (
                 <button className="item" key={item.id} onClick={() => selectAnalysis(item)}>
                   <div><b>{item.name}</b><small>{item.type} · {item.latitude.toFixed(4)}, {item.longitude.toFixed(4)}</small></div>
-                  <strong className={status(score(item)).toLowerCase()}>{score(item)}</strong>
+                  <strong className={status(Number(item.impact_score ?? item.outcome_score ?? 0)).toLowerCase()}>{Number(item.impact_score ?? item.outcome_score ?? 0)}</strong>
                 </button>
               ))}
             </div>
@@ -377,9 +442,9 @@ export default function App() {
                   <h2>{selected.intervention?.name || selected.name}</h2>
                   <p>{selected.intervention?.type || selected.type} · {selected.intervention?.latitude ?? selected.latitude}, {selected.intervention?.longitude ?? selected.longitude}</p>
                 </div>
-                <div className={`score ${status(selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? score(selected.intervention)).toLowerCase()}`}>
-                  {selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? score(selected.intervention)}
-                  <small>/100<br />{status(selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? score(selected.intervention))}</small>
+                <div className={`score ${status(analysisScore).toLowerCase()}`}>
+                  {analysisScore}
+                  <small>/100<br />{status(analysisScore)}</small>
                 </div>
               </div>
 
@@ -394,7 +459,7 @@ export default function App() {
                 <div className="panel soft-panel">
                   <h3>Watershed Impact Score</h3>
                   <div className="score-pillar">
-                    <span className="big-score">{selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? score(selected.intervention)}</span>
+                    <span className="big-score">{analysisScore}</span>
                     <span className="score-label">/ 100</span>
                   </div>
                   <div className="component-list">
@@ -417,25 +482,42 @@ export default function App() {
 
               <div className="two-col">
                 <div className="box">
-                  <h3>📷 Image Information</h3>
-                  <p><b>Filename:</b> {selected.intervention?.name || "Demo site"}</p>
-                  <p><b>GPS:</b> {selected.intervention?.latitude?.toFixed(4) || selected.latitude?.toFixed(4)}°, {selected.intervention?.longitude?.toFixed(4) || selected.longitude?.toFixed(4)}°</p>
-                  <p><b>Timestamp:</b> {new Date().toLocaleDateString("en-IN", {day: "numeric", month: "short", year: "numeric"})}</p>
-                  <p><b>Image dimensions:</b> 4032 × 3024</p>
-                  <p><b>Image quality:</b> {selected.intervention?.photo_verified ? "acceptable" : "review"}</p>
-                  <p><b>Watershed:</b> {selected.intervention?.watershed_id || "Kesla Micro-Watershed"}</p>
-                  <p><b>Nearest intervention:</b> {selected.intervention?.name || selected.name}</p>
+                  <h3>{evidenceItem ? "📷 Image Information" : "Prototype Intervention Record"}</h3>
+                  {evidenceItem ? (
+                    <>
+                      <p><b>Filename:</b> {evidenceItem.filename}</p>
+                      <p><b>GPS:</b> {evidenceItem.exif?.gps_available ? `${evidenceItem.exif.latitude}, ${evidenceItem.exif.longitude}` : "GPS metadata unavailable"}</p>
+                      <p><b>Timestamp:</b> {evidenceItem.exif?.timestamp || "Timestamp unavailable"}</p>
+                      <p><b>Camera:</b> {evidenceItem.exif?.camera || "Camera metadata unavailable"}</p>
+                      <p><b>Image dimensions:</b> {evidenceItem.width} × {evidenceItem.height}</p>
+                      <p><b>Image quality:</b> {evidenceItem.quality?.status || "Not available"}</p>
+                      <p><b>CV result:</b> {evidenceItem.computer_vision?.label || "Not available"} ({Math.round((evidenceItem.computer_vision?.confidence || 0) * 100)}%)</p>
+                    </>
+                  ) : (
+                    <>
+                      <p><b>Intervention:</b> {selected.intervention?.name || selected.name}</p>
+                      <p><b>Location:</b> {selected.intervention?.latitude ?? selected.latitude}, {selected.intervention?.longitude ?? selected.longitude}</p>
+                      <p><b>Note:</b> This is a prototype intervention record without uploaded field evidence.</p>
+                    </>
+                  )}
                 </div>
 
                 <div className="box">
-                  <h3>✅ Image Validation</h3>
-                  <ul className="validation-list">
-                    <li>GPS available</li>
-                    <li>Timestamp available</li>
-                    <li>Image quality acceptable</li>
-                    <li>Inside watershed boundary</li>
-                    <li>No duplicate detected</li>
-                  </ul>
+                  <h3>{evidenceItem ? "✅ Image Validation" : "Prototype Validation Status"}</h3>
+                  {evidenceItem ? (
+                    <ul className="validation-list">
+                      <li>{evidenceItem.exif?.gps_available ? "GPS available" : "GPS metadata unavailable"}</li>
+                      <li>{evidenceItem.exif?.timestamp ? "Timestamp available" : "Timestamp unavailable"}</li>
+                      <li>{evidenceItem.quality?.status ? `Image quality: ${evidenceItem.quality.status}` : "Image quality unavailable"}</li>
+                      <li>{evidenceItem.computer_vision?.label ? `CV result: ${evidenceItem.computer_vision.label}` : "CV result unavailable"}</li>
+                    </ul>
+                  ) : (
+                    <ul className="validation-list">
+                      <li>Prototype intervention record</li>
+                      <li>Location from intervention metadata</li>
+                      <li>No uploaded evidence available</li>
+                    </ul>
+                  )}
                 </div>
               </div>
 
@@ -462,12 +544,12 @@ export default function App() {
                 </div>
 
                 <div className="box">
-                  <h3>🌧️ Rainfall Context</h3>
+                  <h3>🌧️ Prototype Rainfall Context</h3>
                   <p><b>Current / seasonal rainfall:</b> {selected.rainfall?.current_mm ?? 876} mm</p>
                   <p><b>Historical average:</b> {selected.rainfall?.historical_average_mm ?? 860} mm</p>
                   <p><b>Variation:</b> {selected.rainfall?.variation_pct ?? 1.9}%</p>
                   <p><b>Status:</b> <span className="pill pill-neutral">{selected.rainfall?.status ?? "NORMAL"}</span></p>
-                  <p>{selected.rainfall?.note || "Prototype rainfall context based on the selected watershed baseline."}</p>
+                  <p>Prototype contextual data; replace with validated rainfall source for production.</p>
                 </div>
               </div>
 
@@ -515,7 +597,7 @@ export default function App() {
                     watershed: "Kesla Micro-Watershed",
                     area: "412 ha",
                     intervention: selected.intervention?.name || selected.name,
-                    impact_score: selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? score(selected.intervention),
+                    impact_score: selected.impact?.score ?? selected.impact_score ?? selected.outcome_score ?? 0,
                     water_change: selected.impact?.water_change_pct ?? 0,
                     vegetation_change: selected.impact?.vegetation_change_pct ?? 0,
                     rainfall_context: selected.rainfall?.status || "NORMAL",
@@ -540,25 +622,82 @@ export default function App() {
       {tab === "field" && (
         <section className="panel wide">
           <div className="panel-title">
-            <div><h2>📷 {isOffice ? "Evidence Intake" : "Field Evidence Upload"}</h2><p>{isOffice ? "Review or submit image evidence for office analysis." : "Upload an original mobile photo for office analysis."}</p></div>
+            <div><h2>📷 {isOffice ? "Evidence Intake" : "Field Officer Evidence"}</h2><p>{isOffice ? "Review or submit image evidence for office analysis." : "Collect, verify, lock, and submit field evidence."}</p></div>
           </div>
 
-          <div className="upload-box">
-            <input type="file" accept="image/*" onChange={(e) => {setFile(e.target.files[0]); setUpload(null); setUploadError("")}} />
-            <button className="primary" onClick={uploadImage} disabled={uploading}>{uploading ? "Uploading..." : "Upload & Verify"}</button>
+          <div className="field-steps" aria-label="Evidence workflow">
+            {['Watershed', 'Intervention', 'Photo', 'Location', 'Quality', 'Submit'].map((step, index) => <span key={step} className={index < 2 && (index === 0 ? fieldWatershed : fieldIntervention) || index >= 2 && upload ? "complete" : ""}>{index + 1}. {step}</span>)}
           </div>
+
+          <div className="field-selectors">
+            <label>Watershed
+              <select value={fieldWatershed} onChange={(e) => {setFieldWatershed(e.target.value); setFieldIntervention("")}}>
+                <option value="">Select watershed</option>
+                {watersheds.map((watershed) => <option key={watershed.id} value={watershed.id}>{watershed.name}</option>)}
+              </select>
+            </label>
+            <label>Intervention
+              <select value={fieldIntervention} onChange={(e) => setFieldIntervention(e.target.value)} disabled={!fieldWatershed}>
+                <option value="">Select intervention</option>
+                {items.filter((item) => item.watershed_id === fieldWatershed).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.type}</option>)}
+              </select>
+            </label>
+          </div>
+
+          <div className="upload-box field-upload-actions">
+            <label className="primary file-action">📷 Take Photo Now
+              <input className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={(e) => {setFile(e.target.files[0]); setUpload(null); setUploadError(""); setFieldSubmitted(false)}} />
+            </label>
+            <label className="ghost file-action">🖼 Upload Existing Photo
+              <input className="visually-hidden" type="file" accept="image/*" onChange={(e) => {setFile(e.target.files[0]); setUpload(null); setUploadError(""); setFieldSubmitted(false)}} />
+            </label>
+            <button className="primary" onClick={uploadImage} disabled={uploading || !file || !fieldWatershed || !fieldIntervention}>{uploading ? "Checking..." : "Upload & Verify"}</button>
+          </div>
+
+          {file && <p className="selected-file"><b>Selected:</b> {file.name}</p>}
 
           {uploadError && <div className="upload-error" role="alert">{uploadError}</div>}
           {upload && (
-            <div className="upload-result">
+            <div className="field-evidence-card">
               <div>{upload.url && <img src={upload.url} alt="uploaded field evidence" />}</div>
+              <div className="box field-summary">
+                <h3>Field Evidence Summary</h3>
+                <p><b>Watershed:</b> {watersheds.find((entry) => entry.id === fieldWatershed)?.name || "Not selected"}</p>
+                <p><b>Intervention:</b> {items.find((entry) => entry.id === fieldIntervention)?.name || "Not selected"}</p>
+                <p><b>Photo:</b> {upload.filename}</p>
+                <p><b>Resolution:</b> {upload.width} × {upload.height}</p>
+                <p><b>Photo quality:</b> <span className={`quality-${upload.quality?.status}`}>{String(upload.quality?.status || "unavailable").toUpperCase()}</span></p>
+                <p><b>Photo timestamp:</b> {upload.exif?.timestamp || "Timestamp unavailable"} <small>(Photo EXIF)</small></p>
+                <p><b>Camera:</b> {upload.exif?.camera || "Camera information unavailable"}</p>
+                <hr />
+                <h3>Location Verification</h3>
+                <p><b>GPS source:</b> {upload.exif?.gps_available ? "Photo EXIF" : deviceLocation ? "Current Device GPS" : "Unavailable"}</p>
+                <p><b>Latitude:</b> {upload.exif?.gps_available ? upload.exif.latitude : deviceLocation?.latitude ?? "Unavailable"}</p>
+                <p><b>Longitude:</b> {upload.exif?.gps_available ? upload.exif.longitude : deviceLocation?.longitude ?? "Unavailable"}</p>
+                <p><b>Accuracy:</b> {upload.gps_accuracy ?? deviceLocation?.accuracy ?? "Unavailable"}{upload.gps_accuracy || deviceLocation?.accuracy ? " m" : ""}</p>
+                <p><b>Watershed boundary:</b> Could not be verified from the available center-point data.</p>
+                {!upload.exif?.gps_available && !deviceLocation && <button className="secondary-action" onClick={useCurrentDeviceLocation}>Use Current Device Location</button>}
+                {!upload.exif?.gps_available && deviceLocation && <p className="notice compact">Current device location captured separately from photo metadata.</p>}
+                <div className="field-actions">
+                  <button className="primary" onClick={lockFieldLocation} disabled={locationLocked}>{locationLocked ? "🔒 Location Locked" : "🔒 Lock Location"}</button>
+                  {locationLocked && <button className="secondary-action" onClick={() => {setLocationLocked(false); setUpload((current) => ({...current, location_locked: false}))}}>Unlock / Re-verify</button>}
+                </div>
+                {locationError && <div className="upload-error" role="alert">{locationError}</div>}
+                {locationLocked && <p className="locked-label">🔒 LOCKED · {upload.gps_source} · {upload.location_locked_at}</p>}
+                <hr />
+                <p><b>Inspection submitted at:</b> {upload.submitted_at || "Not submitted"}</p>
+                <div className="field-actions">
+                  <button className="primary" onClick={submitFieldEvidence} disabled={!locationLocked || fieldSubmitted}>{fieldSubmitted ? "Evidence Submitted" : "Submit Evidence"}</button>
+                  {fieldSubmitted && fieldIntervention && <button className="secondary-action" onClick={() => selectAnalysis(items.find((item) => item.id === fieldIntervention))}>View Analysis</button>}
+                </div>
+              </div>
               <div className="box">
-                <h3>Verification Result</h3>
-                <p><b>GPS:</b> {upload.exif?.gps_available ? `${upload.exif.latitude}, ${upload.exif.longitude}` : "GPS metadata unavailable"}</p>
-                <p><b>Timestamp:</b> {upload.exif?.timestamp || "Timestamp unavailable"}</p>
-                <p><b>Camera:</b> {upload.exif?.camera || "Camera metadata unavailable"}</p>
-                <p><b>Image quality:</b> {upload.quality?.status}</p>
-                <p><b>Brightness:</b> {upload.quality?.brightness}</p>
+                <h3>Prototype Photo-Quality Validation</h3>
+                <p><b>Status:</b> <span className={`quality-${upload.quality?.status}`}>{String(upload.quality?.status || "unavailable").toUpperCase()}</span></p>
+                <p><b>Brightness:</b> {upload.quality?.brightness ?? "Unavailable"}</p>
+                <p><b>Sharpness proxy:</b> {upload.quality?.sharpness_proxy ?? "Unavailable"}</p>
+                {(upload.quality?.reasons || []).map((reason) => <p key={reason}>• {reason}</p>)}
+                {upload.quality?.status === "poor" && <div className="field-actions"><button className="secondary-action" onClick={() => {setFile(null); setUpload(null)}}>Upload Another</button><button className="secondary-action" onClick={() => {setFile(null); setUpload(null)}}>Retake Photo</button></div>}
                 <p><b>CV baseline:</b> {upload.computer_vision?.label} ({Math.round((upload.computer_vision?.confidence || 0) * 100)}%)</p>
                 <p><b>Vegetation:</b> {Math.round((upload.computer_vision?.vegetation_ratio || 0) * 100)}% · <b>Water:</b> {Math.round((upload.computer_vision?.water_ratio || 0) * 100)}%</p>
               </div>
@@ -630,7 +769,7 @@ export default function App() {
                 setSelected({
                   intervention: item,
                   impact_score: 42,
-                  rainfall: {current_mm: 821, historical_average_mm: 840, variation_pct: -2.3, status: "DRY", note: "Prototype rainfall context: below seasonal baseline."},
+                  rainfall: {current_mm: 821, historical_average_mm: 840, variation_pct: -2.3, status: "NORMAL", note: "Prototype rainfall context: near seasonal baseline."},
                   impact: {
                     score: 42,
                     components: {
@@ -642,9 +781,9 @@ export default function App() {
                     },
                     explanation: [
                       "- Water area decreased by 31.0%",
-                      "+ Vegetation increased by 18.0%",
-                      "- Intervention condition needs field validation",
-                      "- Rainfall is below the seasonal baseline",
+                      "- Rainfall remained close to seasonal baseline",
+                      "- Previous observation was stable",
+                      "Therefore field verification is recommended",
                     ],
                     water_change_pct: -31,
                     vegetation_change_pct: 18,
@@ -654,9 +793,10 @@ export default function App() {
                     priority: "HIGH",
                     confidence: 82,
                     reasons: [
-                      "Water area dropped by 31% compared to the previous observation.",
-                      "Rainfall was near normal, so the decline is not explained by seasonal conditions.",
-                      "Previous condition was stable before the current review.",
+                      "Water area decreased by 31% compared to the previous observation.",
+                      "Rainfall remained close to seasonal baseline.",
+                      "Previous observation was stable before the current review.",
+                      "Therefore field verification is recommended.",
                     ],
                   },
                   intervention_analysis: {type: item.type, condition_score: 36, focus_areas: ["water presence", "water spread", "structural condition"]},

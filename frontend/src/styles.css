@@ -79,6 +79,26 @@ nav b { background: #d9534f; color: #fff; border-radius: 10px; padding: 2px 6px;
 .box { border: 1px solid #dfe8ea; background: #fbfcfc; border-radius: 12px; padding: 15px; }
 .notice { margin-top: 14px; background: #fff8df; border-left: 4px solid #d7a500; padding: 12px; border-radius: 8px; color: #695400; }
 .upload-box { border: 2px dashed #c6d6d9; border-radius: 14px; padding: 28px; text-align: center; display: flex; gap: 10px; justify-content: center; }
+.field-steps { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin: 16px 0; }
+.field-steps span { padding: 10px 6px; text-align: center; border-radius: 8px; background: #edf3f4; color: #657a81; font-size: 12px; font-weight: 700; }
+.field-steps span.complete { background: #dff4e6; color: #1d6d45; }
+.field-selectors { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.field-selectors label { display: grid; gap: 6px; color: #46616a; font-size: 13px; font-weight: 700; }
+.field-selectors select { min-height: 44px; border: 1px solid #d4e0e2; border-radius: 8px; padding: 10px; background: #fff; color: #17343d; }
+.field-upload-actions { align-items: center; flex-wrap: wrap; }
+.file-action { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.selected-file { color: #46616a; }
+.field-evidence-card { display: grid; grid-template-columns: 280px minmax(0, 1fr) minmax(220px, .75fr); gap: 16px; margin-top: 18px; }
+.field-evidence-card > div:first-child img { width: 100%; max-height: 320px; object-fit: cover; border-radius: 12px; }
+.field-summary hr { border: 0; border-top: 1px solid #dfe8ea; margin: 14px 0; }
+.field-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.secondary-action { min-height: 44px; border: 1px solid #b7cbd0; border-radius: 8px; padding: 9px 12px; background: #fff; color: #285762; font-weight: 700; }
+.quality-good { color: #1d6d45; font-weight: 800; }
+.quality-acceptable { color: #8a6500; font-weight: 800; }
+.quality-poor { color: #a03030; font-weight: 800; }
+.locked-label { color: #1d6d45; font-size: 12px; font-weight: 800; overflow-wrap: anywhere; }
+.compact { margin: 8px 0; font-size: 12px; }
 .upload-error { margin-top: 12px; background: #ffe5e5; border-left: 4px solid #c64242; padding: 12px; border-radius: 8px; color: #8c2424; }
 .primary:disabled { opacity: 0.6; cursor: wait; }
 .upload-result { display: grid; grid-template-columns: 300px 1fr; gap: 18px; margin-top: 18px; }
@@ -144,10 +164,31 @@ footer { text-align: center; padding: 18px; color: #6e8086; }
 }
 @media (max-width: 650px) {
   .app { padding: 8px; }
-  header { display: block; }
-  .header-actions { margin-top: 15px; }
+  header { display: block; padding: 18px 16px; }
+  .brand { align-items: flex-start; }
+  .brand h1 { font-size: 25px; }
+  .brand p { font-size: 12px; }
+  .header-actions { margin-top: 15px; flex-wrap: wrap; }
+  .header-actions button, .role-badge { min-height: 44px; }
+  nav.main-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  nav.main-nav button { min-height: 44px; padding: 9px 8px; }
   .cards, .metrics, .upload-result { grid-template-columns: 1fr; }
   .filters, .upload-box { display: grid; }
   .alert-item { grid-template-columns: 1fr; }
   .analysis-head { align-items: flex-start; gap: 10px; }
+  .field-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .field-selectors, .field-evidence-card { grid-template-columns: 1fr; }
+  .field-upload-actions .file-action, .field-upload-actions button { width: 100%; }
+  .map-panel .leaflet-container { height: 390px !important; }
+  .panel { padding: 14px; }
+  .report-actions { justify-content: stretch; }
+  .report-actions button { width: 100%; min-height: 44px; }
+}
+@media (max-width: 380px) {
+  .app { padding: 5px; }
+  .panel { padding: 11px; }
+  .logo { font-size: 32px; }
+  .header-actions { gap: 6px; }
+  .header-actions button, .role-badge { font-size: 11px; padding: 8px; }
+  .field-steps span { font-size: 10px; }
 }

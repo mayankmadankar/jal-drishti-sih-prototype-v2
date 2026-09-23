@@ -258,10 +258,23 @@ def quality_check(img):
     arr = np.asarray(img.convert("RGB").resize((256, 256))).astype(float)
     brightness = float(arr.mean())
     variance = float(arr.mean(axis=2).var())
+    reasons = []
+    if min(img.size) < 720:
+        reasons.append("Image resolution is low")
+    if variance <= 250:
+        reasons.append("Image appears blurry")
+    if brightness < 45:
+        reasons.append("Image is too dark")
+    elif brightness > 215:
+        reasons.append("Image is too bright")
+    status = "poor" if len(reasons) >= 2 or min(img.size) < 400 else "acceptable" if reasons else "good"
     return {
-        "status": "good" if 45 <= brightness <= 215 and variance > 250 else "review",
+        "status": status,
         "brightness": round(brightness, 1),
         "sharpness_proxy": round(variance, 1),
+        "resolution": {"width": img.width, "height": img.height},
+        "reasons": reasons or ["Resolution sufficient", "Image readable", "Blur within acceptable range", "Brightness acceptable"],
+        "note": "Prototype photo-quality validation; not professional forensic analysis.",
     }
 
 
