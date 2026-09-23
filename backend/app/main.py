@@ -35,12 +35,15 @@ TOKEN_HOURS = int(os.getenv("JAL_TOKEN_HOURS", "8"))
 ADMIN_PASSWORD = os.getenv("JAL_ADMIN_PASSWORD", "admin123")
 OFFICE_PASSWORD = os.getenv("JAL_OFFICE_PASSWORD", "office123")
 PUBLIC_BASE_URL = os.getenv("JAL_PUBLIC_BASE_URL", "").rstrip("/")
+CORS_ORIGINS = [origin.strip() for origin in os.getenv("JAL_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
+CORS_ORIGIN_REGEX = os.getenv("JAL_CORS_ORIGIN_REGEX", r"https://[a-zA-Z0-9-]+\.vercel\.app")
 
 app = FastAPI(title="JAL-DRISHTI API", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in os.getenv("JAL_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()],
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

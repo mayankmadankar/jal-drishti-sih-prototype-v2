@@ -9,7 +9,8 @@ services:
       JAL_FIELD_PASSWORD: ${JAL_FIELD_PASSWORD:?Set JAL_FIELD_PASSWORD in .env}
       JAL_DB_PATH: /data/jal_drishiti.sqlite3
       JAL_PUBLIC_BASE_URL: ${JAL_PUBLIC_BASE_URL:-http://localhost:8080}
-      JAL_CORS_ORIGINS: ${JAL_PUBLIC_BASE_URL:-http://localhost:8080}
+      JAL_CORS_ORIGINS: ${JAL_CORS_ORIGINS:-http://localhost:8080}
+      JAL_CORS_ORIGIN_REGEX: ${JAL_CORS_ORIGIN_REGEX:-https://[a-zA-Z0-9-]+\.vercel\.app}
     volumes:
       - app_data:/data
       - uploaded_images:/app/uploads
