@@ -19,6 +19,11 @@ from .services import (
     extract_exif,
     quality_check,
     classify_demo,
+    rainfall_context_for,
+    calculate_impact_score,
+    detect_anomaly,
+    intervention_specific_analysis,
+    generate_report,
 )
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -172,12 +177,88 @@ def analysis(item_id: str, user=Depends(require_office)):
     if not item:
         raise HTTPException(404, "Intervention not found")
 
+    rainfall = rainfall_context_for(item)
+    impact = calculate_impact_score(item, rainfall)
+    anomaly = detect_anomaly(item, rainfall)
+    intervention = intervention_specific_analysis(item)
+
     return {
         "intervention": item,
         "outcome_score": outcome_score(item),
+        "impact_score": impact["score"],
         "gis": gis_analysis(item),
         "computer_vision": image_analysis(item),
+        "rainfall": rainfall,
+        "impact": impact,
+        "anomaly": anomaly,
+        "intervention_analysis": intervention,
+        "method_label": "Prototype analysis using deterministic demo watershed indicators",
     }
+
+@app.get("/api/sites/{site_id}")
+def site(site_id: str, user=Depends(require_office)):
+    item = next((i for i in load_json("interventions.json") if i["id"] == site_id), None)
+    if not item:
+        raise HTTPException(404, "Site not found")
+    watershed = next((w for w in load_json("watersheds.json") if w["id"] == item["watershed_id"]), None)
+    rainfall = rainfall_context_for(item)
+    impact = calculate_impact_score(item, rainfall)
+    anomaly = detect_anomaly(item, rainfall)
+    return {
+        "intervention": item,
+        "watershed": watershed,
+        "rainfall": rainfall,
+        "impact": impact,
+        "anomaly": anomaly,
+    }
+
+@app.get("/api/impact/{item_id}")
+def impact_detail(item_id: str, user=Depends(require_office)):
+    item = next((i for i in load_json("interventions.json") if i["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Intervention not found")
+    rainfall = rainfall_context_for(item)
+    impact = calculate_impact_score(item, rainfall)
+    anomaly = detect_anomaly(item, rainfall)
+    return {
+        "intervention": item,
+        "impact": impact,
+        "rainfall": rainfall,
+        "anomaly": anomaly,
+        "intervention_analysis": intervention_specific_analysis(item),
+    }
+
+@app.get("/api/inspections")
+def inspections(user=Depends(require_office)):
+    items = load_json("interventions.json")
+    rows = []
+    for item in items:
+        rainfall = rainfall_context_for(item)
+        anomaly = detect_anomaly(item, rainfall)
+        if anomaly["status"] == "ANOMALY DETECTED":
+            rows.append({
+                "id": item["id"],
+                "name": item["name"],
+                "type": item["type"],
+                "severity": anomaly["priority"],
+                "reason": anomaly["recommended_action"],
+                "water_change_pct": anomaly.get("water_change_pct", 0),
+                "vegetation_change_pct": anomaly.get("vegetation_change_pct", 0),
+                "rainfall_status": anomaly.get("rainfall_status", "NORMAL"),
+                "confidence": anomaly.get("confidence", 0),
+            })
+    return rows
+
+@app.get("/api/report/{item_id}")
+def report_detail(item_id: str, user=Depends(require_office)):
+    item = next((i for i in load_json("interventions.json") if i["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Intervention not found")
+    watershed = next((w for w in load_json("watersheds.json") if w["id"] == item["watershed_id"]), None)
+    rainfall = rainfall_context_for(item)
+    impact = calculate_impact_score(item, rainfall)
+    anomaly = detect_anomaly(item, rainfall)
+    return generate_report(item, watershed or {}, impact, rainfall, anomaly, evidence_count=1)
 
 @app.post("/api/upload-image")
 async def upload_image(request: Request, file: UploadFile = File(...), user=Depends(current_user)):
