@@ -36,6 +36,7 @@ export default function App() {
   const [alerts, setAlerts] = useState([])
   const [inspections, setInspections] = useState([])
   const [evidence, setEvidence] = useState([])
+  const [evidenceRequests, setEvidenceRequests] = useState([])
   const [session, setSession] = useState(() => JSON.parse(localStorage.getItem("jal_session") || "null"))
   const [loginForm, setLoginForm] = useState({username: "", password: ""})
   const [loginError, setLoginError] = useState("")
@@ -56,6 +57,11 @@ export default function App() {
   const [locationError, setLocationError] = useState("")
   const [locationLocked, setLocationLocked] = useState(false)
   const [fieldSubmitted, setFieldSubmitted] = useState(false)
+  const [fieldNotes, setFieldNotes] = useState("")
+  const [responseParent, setResponseParent] = useState(null)
+  const [requestForm, setRequestForm] = useState({type: "Additional Image", message: ""})
+  const [requestingFor, setRequestingFor] = useState(null)
+  const [reviewingEvidence, setReviewingEvidence] = useState(null)
   const [dark, setDark] = useState(false)
 
   const authHeaders = () => ({Authorization: `Bearer ${session?.token}`})
@@ -77,25 +83,28 @@ export default function App() {
     try {
       const catalogRequests = [apiFetch("/api/watersheds"), apiFetch("/api/interventions")]
       if (session.user.role === "user") {
-        const [watershedsRes, interventionsRes] = await Promise.all(catalogRequests)
-        if (!watershedsRes.ok || !interventionsRes.ok) throw new Error("Field catalogs could not be loaded")
+        const [watershedsRes, interventionsRes, evidenceRes, requestsRes] = await Promise.all([...catalogRequests, apiFetch("/api/evidence"), apiFetch("/api/evidence/requests")])
+        if (![watershedsRes, interventionsRes, evidenceRes, requestsRes].every((response) => response.ok)) throw new Error("Field data could not be loaded")
         setWatersheds(await watershedsRes.json())
         setItems(await interventionsRes.json())
+        setEvidence(await evidenceRes.json())
+        setEvidenceRequests(await requestsRes.json())
         return
       }
-      const [summaryRes, watershedsRes, interventionsRes, alertsRes, evidenceRes, inspectionsRes] = await Promise.all([
+      const [summaryRes, watershedsRes, interventionsRes, alertsRes, evidenceRes, inspectionsRes, requestsRes] = await Promise.all([
         apiFetch("/api/summary"),
         apiFetch("/api/watersheds"),
         apiFetch("/api/interventions"),
         apiFetch("/api/alerts"),
         apiFetch("/api/evidence"),
         apiFetch("/api/inspections"),
+        apiFetch("/api/evidence/requests"),
       ])
-      if (![summaryRes, watershedsRes, interventionsRes, alertsRes, evidenceRes, inspectionsRes].every(r => r.ok)) {
+      if (![summaryRes, watershedsRes, interventionsRes, alertsRes, evidenceRes, inspectionsRes, requestsRes].every(r => r.ok)) {
         throw new Error("Some office data could not be loaded")
       }
-      const [summaryData, watershedsData, interventionsData, alertsData, evidenceData, inspectionsData] = await Promise.all([
-        summaryRes.json(), watershedsRes.json(), interventionsRes.json(), alertsRes.json(), evidenceRes.json(), inspectionsRes.json(),
+      const [summaryData, watershedsData, interventionsData, alertsData, evidenceData, inspectionsData, requestsData] = await Promise.all([
+        summaryRes.json(), watershedsRes.json(), interventionsRes.json(), alertsRes.json(), evidenceRes.json(), inspectionsRes.json(), requestsRes.json(),
       ])
       setSummary(summaryData)
       setWatersheds(watershedsData)
@@ -103,6 +112,7 @@ export default function App() {
       setAlerts(alertsData)
       setEvidence(evidenceData || [])
       setInspections(inspectionsData || [])
+      setEvidenceRequests(requestsData || [])
     } catch (error) {
       setAppError(error.message || "Data could not be loaded")
     }
@@ -138,6 +148,7 @@ export default function App() {
     localStorage.removeItem("jal_session")
     setSession(null)
     setEvidence([])
+    setEvidenceRequests([])
     setSummary(null)
     setSelected(null)
   }
@@ -181,6 +192,8 @@ export default function App() {
       form.append("file", file)
       if (fieldWatershed) form.append("watershed_id", fieldWatershed)
       if (fieldIntervention) form.append("intervention_id", fieldIntervention)
+      if (fieldNotes) form.append("field_notes", fieldNotes)
+      if (responseParent) form.append("parent_evidence_id", responseParent.id)
       const photoGps = upload?.exif?.gps_available ? {latitude: upload.exif.latitude, longitude: upload.exif.longitude, source: "Photo EXIF"} : null
       const location = photoGps || deviceLocation
       if (location) {
@@ -195,6 +208,7 @@ export default function App() {
       setUpload(data)
       setLocationLocked(false)
       setFieldSubmitted(false)
+      setResponseParent(null)
       setEvidence((current) => [{...data, status: data.intervention_id ? "DRAFT - LOCATION REVIEW" : "READY FOR OFFICE REVIEW"}, ...current])
       setTab("field")
     } catch (error) {
@@ -242,7 +256,7 @@ export default function App() {
   async function submitFieldEvidence() {
     if (!upload?.id || !locationLocked) return
     try {
-      const response = await apiFetch(`/api/evidence/${upload.id}/submit`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({watershed_id: fieldWatershed, intervention_id: fieldIntervention})})
+      const response = await apiFetch(`/api/evidence/${upload.id}/submit`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({watershed_id: fieldWatershed, intervention_id: fieldIntervention, field_notes: fieldNotes})})
       const data = await response.json()
       if (!response.ok) throw new Error(data.detail || "Evidence submission failed")
       setFieldSubmitted(true)
@@ -251,6 +265,30 @@ export default function App() {
     } catch (error) {
       setUploadError(error.message || "Network unavailable. Evidence has not been submitted.")
     }
+  }
+
+  async function reviewEvidence(id, nextStatus) {
+    const response = await apiFetch(`/api/evidence/${id}/review-status`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({status: nextStatus})})
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || "Review status could not be changed")
+    await load()
+  }
+
+  async function requestMoreEvidence(id) {
+    if (!requestForm.message.trim()) return
+    const response = await apiFetch(`/api/evidence/${id}/request`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({request_type: requestForm.type, message: requestForm.message})})
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || "Evidence request failed")
+    setRequestingFor(null)
+    setRequestForm({type: "Additional Image", message: ""})
+    await load()
+  }
+
+  async function adminDecision(id, action, reason = "") {
+    const response = await apiFetch(`/api/evidence/${id}/${action}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({reason})})
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.detail || "Admin action failed")
+    await load()
   }
 
   function exportReport() {
@@ -282,6 +320,8 @@ export default function App() {
 
   const role = session?.user.role
   const isOffice = role === "admin" || role === "office"
+  const isAdmin = role === "admin"
+  const isFieldWorker = role === "user"
 
   if (!session) {
     return (
@@ -328,7 +368,8 @@ export default function App() {
         {isOffice && <button className={tab === "dashboard" ? "active" : ""} onClick={() => setTab("dashboard")}>🗺️ Office Map</button>}
         {isOffice && <button className={tab === "analysis" ? "active" : ""} onClick={() => setTab("analysis")}>📊 Analyze</button>}
         <button className={tab === "field" ? "active" : ""} onClick={() => setTab("field")}>📷 Field Evidence</button>
-        {isOffice && <button className={tab === "alerts" ? "active" : ""} onClick={() => setTab("alerts")}>🚨 Review Queue <b>{alerts.length + evidence.length}</b></button>}
+        {isOffice && <button className={tab === "alerts" ? "active" : ""} onClick={() => setTab("alerts")}>🚨 Officer Review <b>{evidence.filter((item) => ["SUBMITTED", "RESUBMITTED", "MORE_EVIDENCE_REQUIRED"].includes(item.status)).length}</b></button>}
+        {isAdmin && <button className={tab === "admin" ? "active" : ""} onClick={() => setTab("admin")}>🛡️ Admin</button>}
       </nav>
 
       {appError && <div className="upload-error" role="alert">{appError}</div>}
@@ -643,6 +684,10 @@ export default function App() {
               </select>
             </label>
           </div>
+          <label className="field-notes">Field notes
+            <textarea value={fieldNotes} onChange={(event) => setFieldNotes(event.target.value)} placeholder="Add factual field observations..." />
+          </label>
+          {responseParent && <div className="notice compact">Responding to an officer request. The original evidence will remain unchanged.</div>}
 
           <div className="upload-box field-upload-actions">
             <label className="primary file-action">📷 Take Photo Now
@@ -657,6 +702,12 @@ export default function App() {
           {file && <p className="selected-file"><b>Selected:</b> {file.name}</p>}
 
           {uploadError && <div className="upload-error" role="alert">{uploadError}</div>}
+          {isFieldWorker && evidenceRequests.filter((request) => request.status === "OPEN").map((request) => (
+            <div className="request-card" key={request.id}>
+              <div><b>🔔 Evidence Request</b><p>{request.message}</p><small>{request.request_type} · Requested by {request.requested_by}</small></div>
+              <button className="primary" onClick={() => {setResponseParent({id: request.evidence_id}); setFieldWatershed(request.watershed_id || ""); setFieldIntervention(request.intervention_id || ""); setTab("field")}}>Upload Response</button>
+            </div>
+          ))}
           {upload && (
             <div className="field-evidence-card">
               <div>{upload.url && <img src={upload.url} alt="uploaded field evidence" />}</div>
@@ -710,7 +761,48 @@ export default function App() {
 
       {tab === "alerts" && isOffice && (
         <section className="panel wide">
-          <div className="panel-title"><div><h2>🚨 Field Verification Queue</h2><p>Interventions that need additional review.</p></div></div>
+          <div className="panel-title"><div><h2>🚨 Officer Review</h2><p>Submitted evidence, requests, analysis, and reports.</p></div></div>
+
+          <div className="review-grid">
+            {evidence.filter((item) => item.status !== "DELETED").map((item) => (
+              <article className="submission-card" key={item.id}>
+                <img src={item.url} alt="field evidence" />
+                <div className="submission-body">
+                  <h3>{items.find((entry) => entry.id === item.intervention_id)?.name || item.intervention_id || item.filename}</h3>
+                  <p><b>Watershed:</b> {watersheds.find((entry) => entry.id === item.watershed_id)?.name || "Unavailable"}</p>
+                  <p><b>Submitted by:</b> {item.uploaded_by}</p>
+                  <p><b>Status:</b> <span className="pill pill-neutral">{item.status}</span></p>
+                  <p><b>GPS:</b> {item.location_locked ? `Verified · ${item.gps_source}` : "Not locked"}</p>
+                  <div className="field-actions">
+                    <button className="secondary-action" onClick={() => setReviewingEvidence(reviewingEvidence === item.id ? null : item.id)}>Review</button>
+                    <button className="secondary-action" onClick={() => reviewEvidence(item.id, "UNDER_REVIEW")}>Open Review</button>
+                    <button className="secondary-action" onClick={() => selectAnalysis(items.find((entry) => entry.id === item.intervention_id))}>Analyze</button>
+                    {isAdmin && <button className="secondary-action" onClick={() => adminDecision(item.id, "approve")}>Approve</button>}
+                  </div>
+                  {reviewingEvidence === item.id && <div className="review-detail">
+                    <p><b>File:</b> {item.filename} · {item.width} × {item.height}</p>
+                    <p><b>Timestamp:</b> {item.photo_timestamp || "Unavailable"}</p>
+                    <p><b>Quality:</b> {item.quality?.status || "Unavailable"}</p>
+                    <p><b>Field notes:</b> {item.field_notes || "None provided"}</p>
+                    <p><b>Satellite/map context:</b> Existing map layers provide visual context only; no satellite-derived NDVI/NDWI is claimed.</p>
+                    {(item.gps_latitude != null || items.find((entry) => entry.id === item.intervention_id)) && <MapContainer className="review-map" center={[item.gps_latitude ?? items.find((entry) => entry.id === item.intervention_id).latitude, item.gps_longitude ?? items.find((entry) => entry.id === item.intervention_id).longitude]} zoom={14} scrollWheelZoom={false}>
+                      <TileLayer attribution="&copy; Esri" url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}" />
+                      <Marker position={[item.gps_latitude ?? items.find((entry) => entry.id === item.intervention_id).latitude, item.gps_longitude ?? items.find((entry) => entry.id === item.intervention_id).longitude]}><Popup>Locked field location<br />Satellite imagery context</Popup></Marker>
+                    </MapContainer>}
+                    <div className="field-actions">
+                      <button className="secondary-action" onClick={() => setRequestingFor(item.id)}>Request More Evidence</button>
+                      <button className="secondary-action" onClick={() => reviewEvidence(item.id, "ANALYSIS_COMPLETE")}>Mark Analysis Complete</button>
+                    </div>
+                    {requestingFor === item.id && <div className="request-form">
+                      <select value={requestForm.type} onChange={(event) => setRequestForm({...requestForm, type: event.target.value})}><option>Additional Image</option><option>Location Verification</option><option>Clearer Image</option><option>Different Angle</option><option>Additional Field Information</option><option>Other</option></select>
+                      <textarea value={requestForm.message} onChange={(event) => setRequestForm({...requestForm, message: event.target.value})} placeholder="Explain what the field worker should provide..." />
+                      <button className="primary" onClick={() => requestMoreEvidence(item.id)}>Send Request</button>
+                    </div>}
+                  </div>}
+                </div>
+              </article>
+            ))}
+          </div>
 
           <div className="alert-stack">
             {inspections.length ? inspections.map((item) => (
@@ -814,6 +906,18 @@ export default function App() {
             <div className="review-card" key={item.id}><img src={item.url} alt="uploaded evidence" /><div><b>{item.filename}</b><p>{item.computer_vision?.label} · {Math.round((item.computer_vision?.confidence || 0) * 100)}% confidence</p><small>{item.status} · {item.width} × {item.height}</small></div></div>
           ))}
           {!evidence.length && <div className="empty">No uploaded images yet.</div>}
+        </section>
+      )}
+
+      {tab === "admin" && isAdmin && (
+        <section className="panel wide">
+          <div className="panel-title"><div><h2>🛡️ Admin Control Panel</h2><p>Approval, decline, soft-delete, restore, and audit-aware record management.</p></div></div>
+          <div className="cards admin-stats">
+            {[["Submitted", evidence.filter((item) => item.status === "SUBMITTED").length], ["Under Review", evidence.filter((item) => item.status === "UNDER_REVIEW").length], ["More Evidence", evidence.filter((item) => item.status === "MORE_EVIDENCE_REQUIRED").length], ["Approved", evidence.filter((item) => item.status === "APPROVED").length], ["Declined", evidence.filter((item) => item.status === "DECLINED").length]].map(([label, value]) => <Card key={label} title={label} value={value} icon="•" />)}
+          </div>
+          <div className="review-grid">
+            {evidence.map((item) => <article className="submission-card" key={item.id}><img src={item.url} alt="field evidence" /><div className="submission-body"><h3>{item.filename}</h3><p>{item.uploaded_by} · {item.status}</p><div className="field-actions"><button className="primary" onClick={() => adminDecision(item.id, "approve")}>Approve</button><button className="secondary-action" onClick={() => {const reason = window.prompt("Decline reason"); if (reason) adminDecision(item.id, "decline", reason)}}>Decline</button>{item.status === "DELETED" ? <button className="secondary-action" onClick={() => adminDecision(item.id, "restore")}>Restore</button> : <button className="secondary-action" onClick={() => {if (window.confirm("Are you sure you want to soft-delete this record?")) adminDecision(item.id, "delete", "Deleted by administrator")}}>Delete</button>}</div></div></article>)}
+          </div>
         </section>
       )}
 

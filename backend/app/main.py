@@ -69,6 +69,18 @@ class LocationLockRequest(BaseModel):
 class EvidenceSubmitRequest(BaseModel):
     intervention_id: str | None = None
     watershed_id: str | None = None
+    field_notes: str | None = None
+
+class EvidenceRequestPayload(BaseModel):
+    request_type: str
+    message: str
+
+class EvidenceStatusPayload(BaseModel):
+    status: str
+    comment: str | None = None
+
+class AdminDecisionPayload(BaseModel):
+    reason: str | None = None
 
 def db():
     connection = sqlite3.connect(DB_PATH)
@@ -95,10 +107,30 @@ def init_db():
             "location_locked_at": "TEXT",
             "photo_timestamp": "TEXT",
             "submitted_at": "TEXT",
+            "field_notes": "TEXT",
+            "officer_id": "TEXT",
+            "parent_evidence_id": "TEXT",
+            "analysis_status": "TEXT NOT NULL DEFAULT 'NOT RUN'",
+            "deleted_at": "TEXT",
+            "deleted_by": "TEXT",
+            "delete_reason": "TEXT",
+            "admin_decision": "TEXT",
+            "admin_decision_at": "TEXT",
+            "admin_decision_by": "TEXT",
         }
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(f"ALTER TABLE evidence ADD COLUMN {name} {definition}")
+        connection.execute("""CREATE TABLE IF NOT EXISTS evidence_requests (
+            id TEXT PRIMARY KEY, evidence_id TEXT NOT NULL, requested_by TEXT NOT NULL,
+            request_type TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL,
+            created_at TEXT NOT NULL, resolved_at TEXT, response_evidence_id TEXT
+        )""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+            id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+            actor TEXT NOT NULL, role TEXT NOT NULL, action TEXT NOT NULL,
+            description TEXT NOT NULL, created_at TEXT NOT NULL
+        )""")
 
 init_db()
 
@@ -130,6 +162,22 @@ def serialize_evidence(row):
         data[key] = json.loads(data[key])
     data["location_locked"] = bool(data.get("location_locked"))
     return data
+
+def role_name(user):
+    return "FIELD_WORKER" if user.get("role") == "user" else user.get("role", "unknown").upper()
+
+def audit(connection, user, entity_id, action, description, entity_type="evidence"):
+    connection.execute("INSERT INTO audit_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (
+        uuid.uuid4().hex, entity_type, entity_id, user["sub"], role_name(user), action,
+        description, datetime.now(timezone.utc).isoformat(),
+    ))
+
+def require_role(*roles):
+    def dependency(user=Depends(current_user)):
+        if user.get("role") not in roles:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "This action is not permitted for your role")
+        return user
+    return dependency
 
 @app.get("/")
 def root():
@@ -203,10 +251,37 @@ def alerts(user=Depends(require_office)):
     return result
 
 @app.get("/api/evidence")
-def evidence(user=Depends(require_office)):
+def evidence(user=Depends(current_user)):
     with db() as connection:
-        rows = connection.execute("SELECT * FROM evidence ORDER BY created_at DESC").fetchall()
+        if user.get("role") == "user":
+            rows = connection.execute("SELECT * FROM evidence WHERE uploaded_by = ? AND status != 'DELETED' ORDER BY created_at DESC", (user["sub"],)).fetchall()
+        elif user.get("role") == "admin":
+            rows = connection.execute("SELECT * FROM evidence ORDER BY created_at DESC").fetchall()
+        else:
+            rows = connection.execute("SELECT * FROM evidence WHERE status != 'DELETED' ORDER BY created_at DESC").fetchall()
     return [serialize_evidence(row) for row in rows]
+
+@app.get("/api/evidence/requests")
+def evidence_requests(user=Depends(current_user)):
+    with db() as connection:
+        if user.get("role") == "user":
+            rows = connection.execute("""SELECT r.*, e.filename, e.intervention_id, e.watershed_id
+                FROM evidence_requests r JOIN evidence e ON e.id = r.evidence_id
+                WHERE e.uploaded_by = ? ORDER BY r.created_at DESC""", (user["sub"],)).fetchall()
+        else:
+            rows = connection.execute("SELECT * FROM evidence_requests ORDER BY created_at DESC").fetchall()
+    return [dict(row) for row in rows]
+
+@app.get("/api/evidence/{evidence_id}/audit")
+def evidence_audit(evidence_id: str, user=Depends(current_user)):
+    with db() as connection:
+        row = connection.execute("SELECT uploaded_by FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        if user.get("role") == "user" and row["uploaded_by"] != user["sub"]:
+            raise HTTPException(403, "Evidence belongs to another field worker")
+        logs = connection.execute("SELECT * FROM audit_log WHERE entity_id = ? ORDER BY created_at", (evidence_id,)).fetchall()
+    return [dict(log) for log in logs]
 
 @app.get("/api/analysis/{item_id}")
 def analysis(item_id: str, user=Depends(current_user)):
@@ -314,6 +389,8 @@ async def upload_image(
     gps_longitude: float | None = Form(None),
     gps_accuracy: float | None = Form(None),
     gps_source: str | None = Form(None),
+    field_notes: str | None = Form(None),
+    parent_evidence_id: str | None = Form(None),
     user=Depends(current_user),
 ):
     if not file.content_type or not file.content_type.startswith("image/"):
@@ -340,7 +417,10 @@ async def upload_image(
         raise HTTPException(400, f"Invalid image: {e}")
 
     evidence_id = uuid.uuid4().hex
-    submitted_at = None if intervention_id else datetime.now(timezone.utc).isoformat()
+    submitted_at = None
+    initial_status = "DRAFT - LOCATION REVIEW" if intervention_id else "READY FOR OFFICE REVIEW"
+    if parent_evidence_id:
+        initial_status = "RESUBMITTED"
     result = {
         "id": evidence_id,
         "filename": name,
@@ -360,19 +440,23 @@ async def upload_image(
         "location_locked_at": None,
         "photo_timestamp": exif.get("timestamp"),
         "submitted_at": submitted_at,
+        "field_notes": field_notes,
+        "parent_evidence_id": parent_evidence_id,
+        "status": initial_status,
         "message": "Image uploaded and checked successfully.",
     }
     with db() as connection:
         connection.execute("""INSERT INTO evidence
             (id, filename, url, width, height, exif, quality, computer_vision, status, created_at, uploaded_by,
              watershed_id, intervention_id, gps_latitude, gps_longitude, gps_accuracy, gps_source,
-             location_locked, location_locked_at, photo_timestamp, submitted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+             location_locked, location_locked_at, photo_timestamp, submitted_at, field_notes, parent_evidence_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
             evidence_id, name, result["url"], width, height, json.dumps(exif), json.dumps(quality), json.dumps(cv),
-            "DRAFT - LOCATION REVIEW" if intervention_id else "READY FOR OFFICE REVIEW",
+            initial_status,
             datetime.now(timezone.utc).isoformat(), user["sub"], watershed_id, intervention_id,
-            gps_latitude, gps_longitude, gps_accuracy, gps_source, 0, None, exif.get("timestamp"), submitted_at,
+            gps_latitude, gps_longitude, gps_accuracy, gps_source, 0, None, exif.get("timestamp"), submitted_at, field_notes, parent_evidence_id,
         ))
+        audit(connection, user, evidence_id, "UPLOADED_EVIDENCE", "Field evidence image uploaded")
     return result
 
 @app.post("/api/evidence/{evidence_id}/lock-location")
@@ -414,6 +498,84 @@ def submit_evidence(evidence_id: str, payload: EvidenceSubmitRequest, user=Depen
             raise HTTPException(403, "Evidence belongs to another field officer")
         if not row["location_locked"]:
             raise HTTPException(400, "Lock a verified location before submitting evidence")
+        submitted_at = datetime.now(timezone.utc).isoformat()
+        next_status = "RESUBMITTED" if row["status"] == "RESUBMITTED" else "SUBMITTED"
         connection.execute("""UPDATE evidence SET watershed_id = COALESCE(?, watershed_id), intervention_id = COALESCE(?, intervention_id),
-            status = ?, submitted_at = ? WHERE id = ?""", (payload.watershed_id, payload.intervention_id, "SUBMITTED FOR OFFICE ANALYSIS", datetime.now(timezone.utc).isoformat(), evidence_id))
-    return {"id": evidence_id, "status": "SUBMITTED FOR OFFICE ANALYSIS"}
+            field_notes = COALESCE(?, field_notes), status = ?, submitted_at = ? WHERE id = ?""", (payload.watershed_id, payload.intervention_id, payload.field_notes, next_status, submitted_at, evidence_id))
+        if next_status == "RESUBMITTED" and row["parent_evidence_id"]:
+            connection.execute("UPDATE evidence_requests SET status = 'RESOLVED', resolved_at = ?, response_evidence_id = ? WHERE evidence_id = ? AND status = 'OPEN'", (submitted_at, evidence_id, row["parent_evidence_id"]))
+        audit(connection, user, evidence_id, "RESPONDED_TO_REQUEST" if next_status == "RESUBMITTED" else "SUBMITTED_EVIDENCE", f"Evidence status changed to {next_status}")
+    return {"id": evidence_id, "status": next_status, "submitted_at": submitted_at}
+
+@app.post("/api/evidence/{evidence_id}/request")
+def request_evidence(evidence_id: str, payload: EvidenceRequestPayload, user=Depends(require_role("office", "admin"))):
+    if not payload.message.strip():
+        raise HTTPException(400, "A request message is required")
+    with db() as connection:
+        row = connection.execute("SELECT * FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row or row["status"] == "DELETED":
+            raise HTTPException(404, "Evidence not found")
+        request_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute("INSERT INTO evidence_requests VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (request_id, evidence_id, user["sub"], payload.request_type, payload.message, "OPEN", now, None, None))
+        connection.execute("UPDATE evidence SET status = ?, officer_id = ? WHERE id = ?", ("MORE_EVIDENCE_REQUIRED", user["sub"], evidence_id))
+        audit(connection, user, evidence_id, "REQUESTED_MORE_IMAGE", payload.message)
+    return {"id": request_id, "evidence_id": evidence_id, "status": "OPEN"}
+
+@app.post("/api/evidence/{evidence_id}/review-status")
+def review_status(evidence_id: str, payload: EvidenceStatusPayload, user=Depends(require_role("office", "admin"))):
+    allowed = {"UNDER_REVIEW", "ANALYZING", "ANALYSIS_COMPLETE"}
+    if payload.status not in allowed:
+        raise HTTPException(400, "Unsupported review status")
+    with db() as connection:
+        row = connection.execute("SELECT id FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        connection.execute("UPDATE evidence SET status = ?, analysis_status = ?, officer_id = ? WHERE id = ?", (payload.status, "COMPLETE" if payload.status == "ANALYSIS_COMPLETE" else payload.status, user["sub"], evidence_id))
+        audit(connection, user, evidence_id, "COMPLETED_ANALYSIS" if payload.status == "ANALYSIS_COMPLETE" else "REVIEW_STATUS_CHANGED", payload.comment or payload.status)
+    return {"id": evidence_id, "status": payload.status}
+
+@app.post("/api/evidence/{evidence_id}/approve")
+def approve_evidence(evidence_id: str, user=Depends(require_role("admin"))):
+    with db() as connection:
+        row = connection.execute("SELECT id FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute("UPDATE evidence SET status = ?, admin_decision = ?, admin_decision_at = ?, admin_decision_by = ? WHERE id = ?", ("APPROVED", "APPROVED", now, user["sub"], evidence_id))
+        audit(connection, user, evidence_id, "APPROVED_RECORD", "Evidence approved by administrator")
+    return {"id": evidence_id, "status": "APPROVED"}
+
+@app.post("/api/evidence/{evidence_id}/decline")
+def decline_evidence(evidence_id: str, payload: AdminDecisionPayload, user=Depends(require_role("admin"))):
+    if not payload.reason or not payload.reason.strip():
+        raise HTTPException(400, "A decline reason is required")
+    with db() as connection:
+        row = connection.execute("SELECT id FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute("UPDATE evidence SET status = ?, admin_decision = ?, admin_decision_at = ?, admin_decision_by = ? WHERE id = ?", ("DECLINED", payload.reason, now, user["sub"], evidence_id))
+        audit(connection, user, evidence_id, "DECLINED_PROJECT", payload.reason)
+    return {"id": evidence_id, "status": "DECLINED", "reason": payload.reason}
+
+@app.post("/api/evidence/{evidence_id}/delete")
+def delete_evidence(evidence_id: str, payload: AdminDecisionPayload, user=Depends(require_role("admin"))):
+    with db() as connection:
+        row = connection.execute("SELECT id FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute("UPDATE evidence SET status = ?, deleted_at = ?, deleted_by = ?, delete_reason = ? WHERE id = ?", ("DELETED", now, user["sub"], payload.reason, evidence_id))
+        audit(connection, user, evidence_id, "DELETED_PROJECT", payload.reason or "Soft-deleted by administrator")
+    return {"id": evidence_id, "status": "DELETED"}
+
+@app.post("/api/evidence/{evidence_id}/restore")
+def restore_evidence(evidence_id: str, user=Depends(require_role("admin"))):
+    with db() as connection:
+        row = connection.execute("SELECT id FROM evidence WHERE id = ?", (evidence_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Evidence not found")
+        connection.execute("UPDATE evidence SET status = ?, deleted_at = NULL, deleted_by = NULL, delete_reason = NULL WHERE id = ?", ("SUBMITTED", evidence_id))
+        audit(connection, user, evidence_id, "RESTORED_PROJECT", "Record restored by administrator")
+    return {"id": evidence_id, "status": "SUBMITTED"}
